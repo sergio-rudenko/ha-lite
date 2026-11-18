@@ -1,9 +1,14 @@
-"""AT-ответы дозвона Windows CE и запуск pppd на уже открытом канале."""
+"""AT-ответы дозвона Windows CE и двусторонний мост в pppd."""
+
+from __future__ import annotations
 
 import os
+import pty
+import select
 import shutil
 import subprocess
 import threading
+from typing import Callable
 
 PPP_FLAG = 0x7E
 LOCAL_IP = "10.44.0.1"
@@ -11,19 +16,19 @@ REMOTE_IP = "10.44.0.2"
 
 
 class AtModem:
-    """Принимает команды модема и отделяет их от кадров PPP.
+    """Принимает AT-команды и отделяет их от кадров PPP.
 
-    Навигатор сначала шлёт AT-команды и номер *99#, и только после ответа
-    CONNECT начинает PPP. Иногда кадр PPP приходит в том же чтении, что и ATD.
+    Навигатор шлёт AT и номер *99#, после CONNECT начинается PPP.
+    Иногда кадр PPP приходит в том же чтении, что и ATD.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._buf = bytearray()
         self.finished = False
         self.hungup = False
         self.ppp = bytearray()
 
-    def feed(self, data):
+    def feed(self, data: bytes) -> bytes:
         if self.finished:
             self.ppp.extend(data)
             return b""
@@ -49,7 +54,7 @@ class AtModem:
             out.extend(self._command(line))
         return bytes(out)
 
-    def _command(self, line):
+    def _command(self, line: bytes) -> bytes:
         text = line.decode("ascii", "replace").strip()
         if not text:
             return b""
@@ -67,14 +72,14 @@ class AtModem:
         return b"OK\r\n"
 
 
-def _eol(buf):
+def _eol(buf: bytearray) -> int | None:
     for i, byte in enumerate(buf):
         if byte in (10, 13):
             return i
     return None
 
 
-def _pop_line(buf):
+def _pop_line(buf: bytearray) -> bytes | None:
     eol = _eol(buf)
     if eol is None:
         return None
@@ -86,7 +91,7 @@ def _pop_line(buf):
     return line
 
 
-def _commands(modem, buf):
+def _commands(modem: AtModem, buf: bytearray) -> bytes:
     out = bytearray()
     while True:
         line = _pop_line(buf)
@@ -98,7 +103,7 @@ def _commands(modem, buf):
     return bytes(out)
 
 
-def pppd_bin():
+def pppd_bin() -> str | None:
     found = shutil.which("pppd")
     if found:
         return found
@@ -108,10 +113,14 @@ def pppd_bin():
     return None
 
 
-def pppd_command():
-    binary = pppd_bin() or "pppd"
+def pppd_args(device: str) -> list[str]:
+    binary = pppd_bin()
+    if binary is None:
+        raise RuntimeError("Не найден pppd. На нетбуке: sudo apt install ppp")
     return [
         binary,
+        device,
+        "115200",
         "nodetach",
         "local",
         "nocrtscts",
@@ -143,50 +152,115 @@ def pppd_command():
     ]
 
 
-def start_pppd(sock, backlog, log):
-    """Отдаёт pppd сначала уже прочитанные байты, затем остальной канал."""
-    binary = pppd_bin()
-    if binary is None:
-        raise RuntimeError("Не найден pppd. На нетбуке: sudo apt install ppp")
-    read_fd, write_fd = os.pipe()
+def run_at_then_ppp(fd: int, log: Callable[[str], None]) -> None:
+    """На fd: сначала AT-модем, затем PPP через pty."""
+    modem = AtModem()
+    while not modem.finished:
+        try:
+            chunk = os.read(fd, 2048)
+        except OSError as error:
+            log("обрыв на AT: %s" % error)
+            return
+        if not chunk:
+            log("канал закрыт на этапе AT")
+            return
+        log("AT << %r" % chunk[:120])
+        reply = modem.feed(chunk)
+        if reply:
+            log("AT >> %r" % reply)
+            os.write(fd, reply)
+        if modem.hungup:
+            log("навигатор положил трубку")
+            return
+
+    backlog = bytes(modem.ppp)
+    if backlog:
+        log("уже есть %d байт PPP" % len(backlog))
+    start_pppd(fd, backlog, log)
+
+
+def start_pppd(fd: int, backlog: bytes, log: Callable[[str], None]) -> None:
+    """Двусторонний мост Bluetooth fd ↔ pty ↔ pppd."""
+    master, slave = pty.openpty()
+    slave_name = os.ttyname(slave)
+    cmd = pppd_args(slave_name)
+    log("запуск: %s" % " ".join(cmd))
     proc = subprocess.Popen(
-        pppd_command(),
-        stdin=read_fd,
+        cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         close_fds=True,
     )
-    os.close(read_fd)
+    os.close(slave)
 
-    def pump():
-        try:
-            if backlog:
-                os.write(write_fd, backlog)
-            while True:
-                chunk = sock.recv(2048)
-                if not chunk:
-                    break
-                os.write(write_fd, chunk)
-        except OSError as error:
-            log("канал закрыт: %s" % error)
-        finally:
-            try:
-                os.close(write_fd)
-            except OSError:
-                pass
-
-    def follow():
+    def follow() -> None:
         stream = proc.stdout
         if stream is None:
             return
         for raw in stream:
             line = raw.decode("utf-8", "replace").rstrip()
             log("pppd: %s" % line)
-            if "IP address" in line:
-                log("Канал поднят. На навигаторе откройте http://%s:4731/" % LOCAL_IP)
+            if "IP address" in line or "local  IP address" in line:
+                log("Канал поднят. На навигаторе: http://%s:4731/" % LOCAL_IP)
         code = proc.wait()
         log("pppd завершился с кодом %s" % code)
 
-    threading.Thread(target=pump, name="ppp-pump", daemon=True).start()
     threading.Thread(target=follow, name="ppp-log", daemon=True).start()
-    return proc
+
+    try:
+        if backlog:
+            os.write(master, backlog)
+        _bridge(fd, master, log)
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def _bridge(fd: int, master: int, log: Callable[[str], None]) -> None:
+    for handle in (fd, master):
+        os.set_blocking(handle, False)
+    try:
+        while True:
+            readable, _, _ = select.select([fd, master], [], [], 60.0)
+            if not readable:
+                log("тишина 60 с, ждём дальше")
+                continue
+            if fd in readable:
+                try:
+                    data = os.read(fd, 4096)
+                except BlockingIOError:
+                    data = b""
+                except OSError as error:
+                    log("чтение BT: %s" % error)
+                    break
+                if not data:
+                    log("BT закрыл канал")
+                    break
+                os.write(master, data)
+            if master in readable:
+                try:
+                    data = os.read(master, 4096)
+                except BlockingIOError:
+                    data = b""
+                except OSError as error:
+                    log("чтение pty: %s" % error)
+                    break
+                if not data:
+                    log("pppd закрыл pty")
+                    break
+                os.write(fd, data)
+    finally:
+        for handle in (fd, master):
+            try:
+                os.set_blocking(handle, True)
+            except OSError:
+                pass
