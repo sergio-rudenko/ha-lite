@@ -36,18 +36,17 @@ sudo python3 bluetooth/dun.py
 5. Подключить
 6. Браузер → `http://10.44.0.1:4731/`
 
-### «The port is not available» и `dun.py` молчит
+### S570HD: в Bluetooth manager только trusted / untrusted
 
-Значит WinCE **не открыл RFCOMM** до нетбука. Список модемов уже правильный; ломается порядок.
+Сервисов и кнопки Connect к DUN на этой прошивке нет — так и должно быть.
 
-1. На нетбуке: `sudo python3 bluetooth/dun.py` (должны быть строки `trusted:` и `Жду RFCOMM`).
-2. На навигаторе оставьте **одну** пару с ha217b, лишние устройства удалите.
-3. **Сначала** Bluetooth manager → ha217b → Dial-up Networking → **Connect**  
-   В окне `dun.py` должна появиться строка `★ входящий RFCOMM`.
-4. **Потом** Remote Networking → **Bluetooth DUN modem** или **Bluetooth DUN on COM8** → `*99#`.
-5. Никогда: Hayes on COM1.
+1. В **trusted** только **ha217b**. Остальные пары удалите (из‑за них COM8 часто «port is not available»).
+2. На нетбуке: `sudo python3 bluetooth/dun.py` — в логе `trusted:`, `connect:` / `link ok:`, затем `Жду RFCOMM`.
+3. Remote Networking → **Bluetooth DUN modem** или **Bluetooth DUN on COM8** → номер `*99#`.
+4. Не Hayes on COM1.
+5. Когда канал реально откроется, в `dun.py` будет `★ входящий RFCOMM`.
 
-Если на шаге 3 в `dun.py` по-прежнему тихо — пришлите скрин сервисов Bluetooth у ha217b и полный старт `dun.py`.
+Если после `link ok:` всё ещё «port is not available» — пришлите полный вывод старта `dun.py` и точное имя выбранного модема.
 
 ## Клавиатура WinCE (если снова понадобится PIN)
 

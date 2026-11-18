@@ -325,17 +325,50 @@ def main() -> int:
     log("  DUN RFCOMM %s + Serial RFCOMM %s" % (DUN_CHANNEL, SPP_CHANNEL))
     log("  После CONNECT панель: http://%s:4731/" % LOCAL_IP)
     log("")
-    log("=== WinCE: если «port is not available» и здесь тихо ===")
-    log("1. Оставьте только ОДНУ пару с %s, лишние устройства удалите." % BT_NAME)
-    log("2. Bluetooth manager → %s → сервисы → Dial-up Networking → Connect" % BT_NAME)
-    log("   (не Remote Networking; именно Connect в Bluetooth)")
-    log("3. Как только здесь появится «★ входящий RFCOMM» —")
-    log("   Remote Networking → Bluetooth DUN modem или DUN on COM8 → *99#")
+    log("=== S570HD: в Bluetooth manager только trusted/untrusted ===")
+    log("Сервисов и Connect там нет — это нормально для этой прошивки.")
+    log("1. В trusted оставьте ТОЛЬКО %s (лишние пары удалите)." % BT_NAME)
+    log("2. Этот скрипт сам держит ACL-линк к спаренным (см. connect: ниже).")
+    log("3. Remote Networking → Bluetooth DUN modem или DUN on COM8 → *99#")
     log("4. Hayes on COM1 не использовать.")
+    log("5. Успех = строка «★ входящий RFCOMM» в этом окне.")
     log("")
     log("Жду RFCOMM. Остановка: Ctrl+C")
 
     mainloop = GLib.MainLoop()
+
+    def keep_acl() -> bool:
+        """Держим ACL: на урезанном WinCE COM8 часто мёртв без живого линка."""
+        try:
+            objects = obj_manager.GetManagedObjects()
+        except dbus.exceptions.DBusException as error:
+            log("keep_acl: %s" % error)
+            return True
+        for path, interfaces in objects.items():
+            if "org.bluez.Device1" not in interfaces:
+                continue
+            dev = interfaces["org.bluez.Device1"]
+            if not bool(dev.get("Paired", False)):
+                continue
+            addr = str(dev.get("Address"))
+            name = str(dev.get("Name") or dev.get("Alias") or "?")
+            connected = bool(dev.get("Connected", False))
+            if connected:
+                log("link ok: %s (%s)" % (addr, name))
+                continue
+            try:
+                device = dbus.Interface(
+                    bus.get_object("org.bluez", path), "org.bluez.Device1"
+                )
+                log("connect: %s (%s)…" % (addr, name))
+                device.Connect()
+            except dbus.exceptions.DBusException as error:
+                log("connect %s: %s" % (addr, error))
+        return True
+
+    # Сразу и каждые 20 с.
+    keep_acl()
+    GLib.timeout_add_seconds(20, keep_acl)
 
     def stop(*_args) -> None:
         log("остановка…")
