@@ -1,12 +1,41 @@
 #!/bin/bash
 # Сопряжение S570HD ↔ нетбук ha217b.
-# Запускать НА нетбуке (192.168.8.139), не в облаке:
-#   sudo bash bluetooth/pair.sh
+# Запускать НА нетбуке (192.168.8.139):
+#   sudo bash bluetooth/pair.sh              # ждать навигатор, Just Works (без PIN)
+#   sudo bash bluetooth/pair.sh --pin        # PIN 1234 (если Just Works не взял)
+#   sudo bash bluetooth/pair.sh --to AA:BB:CC:DD:EE:FF
+#       # начать пару с нетбука; PIN вводит агент, на навигаторе ничего не печатают
 set -euo pipefail
 
 PIN="${PIN:-1234}"
 BT_NAME="${BT_NAME:-ha217b}"
 PIN_FILE="${PIN_FILE:-/tmp/ha-panel-bt-pin}"
+MODE="justworks"
+TARGET=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pin) MODE="pin"; shift ;;
+    --just-works|--justworks) MODE="justworks"; shift ;;
+    --to)
+      MODE="initiate"
+      TARGET="${2:-}"
+      if [[ -z "${TARGET}" ]]; then
+        echo "Укажите адрес навигатора: --to AA:BB:CC:DD:EE:FF" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    -h|--help)
+      sed -n '2,8p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Неизвестный аргумент: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -38,28 +67,35 @@ adapter_ready() {
 
 prepare_adapter() {
   bluetoothctl power on >/dev/null
-  bluetoothctl system-alias "${BT_NAME}" >/dev/null || bluetoothctl system-alias "${BT_NAME}"
+  bluetoothctl system-alias "${BT_NAME}" >/dev/null || true
   bluetoothctl pairable on >/dev/null
   bluetoothctl discoverable on >/dev/null
-  # Без таймаута, пока крутится этот скрипт.
-  if [[ -f /etc/bluetooth/main.conf ]]; then
-    if grep -q '^DiscoverableTimeout' /etc/bluetooth/main.conf; then
-      sed -i 's/^DiscoverableTimeout.*/DiscoverableTimeout = 0/' /etc/bluetooth/main.conf
-    elif grep -q '^\[General\]' /etc/bluetooth/main.conf; then
-      sed -i '/^\[General\]/a DiscoverableTimeout = 0' /etc/bluetooth/main.conf
-    fi
-  fi
-  # Старый WinCE часто не умеет SSP — только PIN.
   if command -v btmgmt >/dev/null 2>&1; then
-    btmgmt ssp off >/dev/null 2>&1 || true
+    if [[ "${MODE}" == "justworks" ]]; then
+      btmgmt ssp on >/dev/null 2>&1 || true
+    else
+      # Старый WinCE с полем PIN часто ждёт legacy-пару.
+      btmgmt ssp off >/dev/null 2>&1 || true
+    fi
     btmgmt pairable on >/dev/null 2>&1 || true
     btmgmt discov on >/dev/null 2>&1 || true
     btmgmt connectable on >/dev/null 2>&1 || true
   fi
 }
 
-printf '%s\n' "${PIN}" >"${PIN_FILE}"
-chmod 600 "${PIN_FILE}"
+print_wince_keyboard_hint() {
+  cat <<'EOF'
+
+Если на навигаторе снова попросят PIN и нет клавиатуры:
+  • ткните в поле PIN — иногда всплывает цифровая панель;
+  • иконка клавиатуры внизу экрана / в трее WinCE;
+  • в проводнике найдите и запустите ToggleInputPanel.exe
+    (часто лежит в ResidentFlash2 или на карте);
+  • либо прервите и используйте режим без PIN (скрипт по умолчанию)
+    или пару с нетбука: sudo bash pair.sh --to <адрес навигатора>
+
+EOF
+}
 
 need_root
 install_pkgs
@@ -68,19 +104,45 @@ prepare_adapter
 
 ADDR="$(bluetoothctl show | awk '/Controller/{print $2; exit}')"
 echo
-echo "Нетбук готов к сопряжению."
-echo "  Имя:     ${BT_NAME}"
-echo "  Адрес:   ${ADDR:-неизвестен}"
-echo "  PIN:     ${PIN}"
-echo
-echo "На навигаторе S570HD:"
-echo "  1. Bluetooth → поиск устройств"
-echo "  2. Выбрать ${BT_NAME}"
-echo "  3. Ввести PIN ${PIN}"
-echo
-echo "Оставьте это окно открытым, пока не спаритесь."
-echo "Остановка: Ctrl+C"
-echo
+echo "Адаптер: ${BT_NAME} (${ADDR:-?})"
+echo "Режим:   ${MODE}"
 
-# Агент с фиксированным PIN для legacy-сопряжения WinCE.
-exec bt-agent -c NoInputNoOutput -p "${PIN_FILE}"
+if [[ "${MODE}" == "justworks" ]]; then
+  echo "PIN не нужен. На навигаторе выберите ${BT_NAME} и подтвердите пару без ввода."
+  print_wince_keyboard_hint
+  echo "Оставьте окно открытым. Остановка: Ctrl+C"
+  echo
+  exec bt-agent -c NoInputNoOutput
+fi
+
+printf '%s\n' "${PIN}" >"${PIN_FILE}"
+chmod 600 "${PIN_FILE}"
+
+if [[ "${MODE}" == "pin" ]]; then
+  echo "PIN: ${PIN}"
+  echo "На навигаторе нужна клавиатура или цифровая панель."
+  print_wince_keyboard_hint
+  echo "Оставьте окно открытым. Остановка: Ctrl+C"
+  echo
+  exec bt-agent -c NoInputNoOutput -p "${PIN_FILE}"
+fi
+
+# MODE=initiate — пару начинает нетбук, PIN отдаёт агент.
+echo "Цель: ${TARGET}"
+echo "Сканирование 12 с…"
+bluetoothctl --timeout 12 scan on >/dev/null 2>&1 || true
+bt-agent -c NoInputNoOutput -p "${PIN_FILE}" &
+AGENT_PID=$!
+trap 'kill ${AGENT_PID} 2>/dev/null || true' EXIT
+sleep 1
+echo "Запрос пары к ${TARGET} (PIN ${PIN} подставит нетбук)…"
+if bluetoothctl pair "${TARGET}"; then
+  bluetoothctl trust "${TARGET}" || true
+  echo
+  echo "Готово. Проверьте на навигаторе, что ${BT_NAME} в списке paired."
+else
+  echo
+  echo "Пара не установилась. Убедитесь, что навигатор виден по Bluetooth и близко."
+  print_wince_keyboard_hint
+  exit 1
+fi
