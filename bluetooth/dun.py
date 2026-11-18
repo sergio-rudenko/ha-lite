@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Bluetooth Dial-Up Networking + Serial Port для S570HD → ha217b.
+"""Bluetooth DUN + Serial Port для S570HD → ha217b.
 
-Запуск на нетбуке:
+Если WinCE пишет «port is not available», а этот скрипт молчит —
+RFCOMM до нетбука даже не доходит. Сначала в Bluetooth-менеджере
+навигатора сделайте Connect к Dial-up Networking / ha217b, и только
+потом Connect в Remote Networking. Здесь должны появиться строки сессии.
+
   sudo python3 bluetooth/dun.py
-
-WinCE часто пишет «port is not available», если выбран Hayes на COM1.
-Нужен модем Bluetooth / виртуальный COM от Serial Port. Поэтому
-регистрируем и DUN (0x1103), и Serial Port (0x1101).
 """
 
 from __future__ import annotations
@@ -24,15 +24,18 @@ DUN_UUID = "00001103-0000-1000-8000-00805f9b34fb"
 SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb"
 DUN_PATH = "/org/ha_panel/dun"
 SPP_PATH = "/org/ha_panel/spp"
+AGENT_PATH = "/org/ha_panel/agent"
 BT_NAME = os.environ.get("BT_NAME", "ha217b")
 DUN_CHANNEL = int(os.environ.get("DUN_CHANNEL", "1"))
 SPP_CHANNEL = int(os.environ.get("SPP_CHANNEL", "2"))
 
+# 0x1103 DUN + 0x1201 Networking — так старые стеки чаще видят «модем».
 DUN_RECORD = """<?xml version="1.0" encoding="UTF-8"?>
 <record>
   <attribute id="0x0001">
     <sequence>
       <uuid value="0x1103"/>
+      <uuid value="0x1201"/>
     </sequence>
   </attribute>
   <attribute id="0x0004">
@@ -136,18 +139,90 @@ def main() -> int:
         props.Set("org.bluez.Adapter1", "Alias", BT_NAME)
         props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(True))
         props.Set("org.bluez.Adapter1", "Pairable", dbus.Boolean(True))
-        # Networking / telephony class — WinCE охотнее показывает модем.
         try:
-            props.Set(
-                "org.bluez.Adapter1",
-                "Class",
-                dbus.UInt32(0x020300),
-            )
+            props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(0))
         except dbus.exceptions.DBusException:
             pass
+        adapter_addr = str(props.Get("org.bluez.Adapter1", "Address"))
     except dbus.exceptions.DBusException as error:
         log("Bluetooth-адаптер: %s" % error)
         return 1
+
+    # Trust всем уже спаренным — иначе входящий RFCOMM режется молча.
+    obj_manager = dbus.Interface(
+        bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager"
+    )
+    paired = []
+    for path, interfaces in obj_manager.GetManagedObjects().items():
+        if "org.bluez.Device1" not in interfaces:
+            continue
+        dev = interfaces["org.bluez.Device1"]
+        name = str(dev.get("Name") or dev.get("Alias") or "?")
+        addr = str(dev.get("Address"))
+        is_paired = bool(dev.get("Paired", False))
+        if not is_paired:
+            continue
+        paired.append((addr, name, str(path)))
+        try:
+            device = bus.get_object("org.bluez", path)
+            dbus.Interface(device, "org.freedesktop.DBus.Properties").Set(
+                "org.bluez.Device1", "Trusted", dbus.Boolean(True)
+            )
+            log("trusted: %s (%s)" % (addr, name))
+        except dbus.exceptions.DBusException as error:
+            log("trust %s: %s" % (addr, error))
+
+    if not paired:
+        log("Пока нет спаренных устройств. Сначала pair.sh / сопряжение с навигатором.")
+
+    class Agent(dbus.service.Object):
+        @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+        def Release(self) -> None:
+            pass
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+        def AuthorizeService(self, device, uuid) -> None:
+            log("AuthorizeService %s %s" % (device, uuid))
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
+        def RequestPinCode(self, device) -> str:
+            log("RequestPinCode %s → 1234" % device)
+            return "1234"
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
+        def RequestPasskey(self, device) -> int:
+            return dbus.UInt32(1234)
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="ouq", out_signature="")
+        def DisplayPasskey(self, device, passkey, entered) -> None:
+            log("DisplayPasskey %s %s" % (device, passkey))
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+        def DisplayPinCode(self, device, pincode) -> None:
+            log("DisplayPinCode %s %s" % (device, pincode))
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+        def RequestConfirmation(self, device, passkey) -> None:
+            log("RequestConfirmation %s %s — ok" % (device, passkey))
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+        def RequestAuthorization(self, device) -> None:
+            log("RequestAuthorization %s — ok" % device)
+
+        @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+        def Cancel(self) -> None:
+            pass
+
+    agent = Agent(bus, AGENT_PATH)
+    agent_mgr = dbus.Interface(
+        bus.get_object("org.bluez", "/org/bluez"), "org.bluez.AgentManager1"
+    )
+    try:
+        agent_mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+        agent_mgr.RequestDefaultAgent(AGENT_PATH)
+        log("agent: NoInputNoOutput (auto-accept)")
+    except dbus.exceptions.DBusException as error:
+        log("agent: %s (продолжаем без него)" % error)
 
     sessions = {"n": 0}
     lock = threading.Lock()
@@ -158,7 +233,7 @@ def main() -> int:
             sid = sessions["n"]
 
         def worker() -> None:
-            log("[%s #%s] сессия от %s (fd=%s)" % (label, sid, device, handle))
+            log("[%s #%s] ★ входящий RFCOMM от %s (fd=%s)" % (label, sid, device, handle))
             try:
                 run_at_then_ppp(handle, lambda m: log("[%s #%s] %s" % (label, sid, m)))
             except Exception as error:
@@ -244,21 +319,21 @@ def main() -> int:
         log("RegisterProfile: %s" % error)
         return 1
 
-    log("Служба дозвона запущена (DUN + Serial Port).")
-    log("  Имя:     %s" % BT_NAME)
-    log("  DUN:     RFCOMM %s" % DUN_CHANNEL)
-    log("  Serial:  RFCOMM %s" % SPP_CHANNEL)
-    log("  Адрес:   %s после CONNECT" % LOCAL_IP)
     log("")
-    log("Важно для WinCE — «port is not available»:")
-    log("  НЕ выбирайте Hayes compatible / COM1.")
-    log("  Нужен пункт с Bluetooth / ha217b / Dial-up Networking.")
-    log("  Если модема Bluetooth нет в списке:")
-    log("    Bluetooth manager → ha217b → сервисы → Dial-up / Serial")
-    log("    иногда там же назначают исходящий COM (COM6/COM8).")
-    log("  Затем Make New Connection → этот модем/COM → *99#")
+    log("Служба готова.")
+    log("  Адаптер: %s (%s)" % (BT_NAME, adapter_addr))
+    log("  DUN RFCOMM %s + Serial RFCOMM %s" % (DUN_CHANNEL, SPP_CHANNEL))
+    log("  После CONNECT панель: http://%s:4731/" % LOCAL_IP)
     log("")
-    log("Остановка: Ctrl+C")
+    log("=== WinCE: если «port is not available» и здесь тихо ===")
+    log("1. Оставьте только ОДНУ пару с %s, лишние устройства удалите." % BT_NAME)
+    log("2. Bluetooth manager → %s → сервисы → Dial-up Networking → Connect" % BT_NAME)
+    log("   (не Remote Networking; именно Connect в Bluetooth)")
+    log("3. Как только здесь появится «★ входящий RFCOMM» —")
+    log("   Remote Networking → Bluetooth DUN modem или DUN on COM8 → *99#")
+    log("4. Hayes on COM1 не использовать.")
+    log("")
+    log("Жду RFCOMM. Остановка: Ctrl+C")
 
     mainloop = GLib.MainLoop()
 
@@ -269,12 +344,15 @@ def main() -> int:
                 manager.UnregisterProfile(path)
             except dbus.exceptions.DBusException:
                 pass
+        try:
+            agent_mgr.UnregisterAgent(AGENT_PATH)
+        except dbus.exceptions.DBusException:
+            pass
         mainloop.quit()
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    # keep refs
-    _ = (dun_profile, spp_profile)
+    _ = (dun_profile, spp_profile, agent)
     mainloop.run()
     return 0
 

@@ -26,17 +26,18 @@ sudo python3 bluetooth/dun.py
 5. Подключить
 6. Браузер → `http://10.44.0.1:4731/`
 
-### «The port is not available»
+### «The port is not available» и `dun.py` молчит
 
-Почти всегда выбран не тот модем.
+Значит WinCE **не открыл RFCOMM** до нетбука. Список модемов уже правильный; ломается порядок.
 
-- **Нельзя:** `Hayes compatible on COM1` (или COM2/COM3 без Bluetooth) — порта нет, WinCE так и пишет.
-- **Нужно:** модем с именем Bluetooth / ha217b / Dial-up Networking.
-- Если такого пункта нет: Bluetooth manager → устройство **ha217b** → сервисы → включить **Dial-up Networking** и/или **Serial Port**. Иногда там же назначают исходящий COM (часто COM6 или COM8) — в Make New Connection выбирайте **этот** COM.
-- На нетбуке в момент дозвона должен крутиться `sudo python3 bluetooth/dun.py`. Без него сервисов модема нет.
-- После смены службы на нетбуке: на навигаторе отключить/подключить Bluetooth или удалить соединение и создать заново.
+1. На нетбуке: `sudo python3 bluetooth/dun.py` (должны быть строки `trusted:` и `Жду RFCOMM`).
+2. На навигаторе оставьте **одну** пару с ha217b, лишние устройства удалите.
+3. **Сначала** Bluetooth manager → ha217b → Dial-up Networking → **Connect**  
+   В окне `dun.py` должна появиться строка `★ входящий RFCOMM`.
+4. **Потом** Remote Networking → **Bluetooth DUN modem** или **Bluetooth DUN on COM8** → `*99#`.
+5. Никогда: Hayes on COM1.
 
-Если снова ошибка — пришлите: (1) точный текст, (2) что выбрано в списке модемов, (3) вывод `dun.py`.
+Если на шаге 3 в `dun.py` по-прежнему тихо — пришлите скрин сервисов Bluetooth у ha217b и полный старт `dun.py`.
 
 ## Клавиатура WinCE (если снова понадобится PIN)
 
