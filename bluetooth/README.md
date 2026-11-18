@@ -40,13 +40,13 @@ sudo python3 bluetooth/dun.py
 
 Сервисов и кнопки Connect к DUN на этой прошивке нет — так и должно быть.
 
-1. В **trusted** только **ha217b**. Остальные пары удалите (из‑за них COM8 часто «port is not available»).
-2. На нетбуке: `sudo python3 bluetooth/dun.py` — в логе `trusted:`, `connect:` / `link ok:`, затем `Жду RFCOMM`.
-3. Remote Networking → **Bluetooth DUN modem** или **Bluetooth DUN on COM8** → номер `*99#`.
-4. Не Hayes on COM1.
-5. Когда канал реально откроется, в `dun.py` будет `★ входящий RFCOMM`.
+1. В **trusted** только навигатор (`GPS system`). Лишние пары удалите.
+2. На нетбуке: `sudo python3 bluetooth/dun.py`.
+3. `br-connection-profile-unavailable` при попытке Connect *к* навигатору — норма: он сам клиент, не сервер.
+4. Remote Networking → **Bluetooth DUN modem** или **DUN on COM8** → `*99#`.
+5. Не Hayes on COM1. Успех = `★ входящий RFCOMM` в `dun.py`.
 
-Если после `link ok:` всё ещё «port is not available» — пришлите полный вывод старта `dun.py` и точное имя выбранного модема.
+Если при наборе по-прежнему «port is not available» и нет `★ входящий RFCOMM` — стек WinCE не открывает RFCOMM; пришлите полный старт `dun.py` и список trusted.
 
 ## Клавиатура WinCE (если снова понадобится PIN)
 
