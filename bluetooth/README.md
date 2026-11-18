@@ -43,10 +43,11 @@ sudo python3 bluetooth/dun.py
 1. В **trusted** только навигатор (`GPS system`). Лишние пары удалите.
 2. На нетбуке: `sudo python3 bluetooth/dun.py`.
 3. `br-connection-profile-unavailable` при попытке Connect *к* навигатору — норма: он сам клиент, не сервер.
-4. Remote Networking → **Bluetooth DUN modem** или **DUN on COM8** → `*99#`.
-5. Не Hayes on COM1. Успех = `★ входящий RFCOMM` в `dun.py`.
-
-Если при наборе по-прежнему «port is not available» и нет `★ входящий RFCOMM` — стек WinCE не открывает RFCOMM; пришлите полный старт `dun.py` и список trusted.
+4. На S570HD набор лучше делать **из оболочки вендора** (не Control Panel WinCE) —
+   через неё уже приходит `★ входящий RFCOMM`.
+5. Модем: Bluetooth DUN / DUN on COM8, номер `*99#`. Не Hayes on COM1.
+6. В логе дальше должны быть `AT << …`, `CONNECT`, затем `pppd:` и страница
+   `http://10.44.0.1:4731/`.
 
 ## Клавиатура WinCE (если снова понадобится PIN)
 

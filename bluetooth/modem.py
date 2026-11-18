@@ -153,12 +153,38 @@ def pppd_args(device: str) -> list[str]:
 
 
 def run_at_then_ppp(fd: int, log: Callable[[str], None]) -> None:
-    """На fd: сначала AT-модем, затем PPP через pty."""
+    """На fd: сначала AT-модем, затем PPP через pty.
+
+    BlueZ часто отдаёт неблокирующий сокет: os.read сразу даёт EAGAIN (11),
+    это не обрыв — ждём данные через select.
+    """
+    try:
+        os.set_blocking(fd, True)
+    except OSError:
+        pass
+
     modem = AtModem()
     while not modem.finished:
         try:
+            readable, _, _ = select.select([fd], [], [], 60.0)
+        except (OSError, ValueError) as error:
+            log("обрыв на AT (select): %s" % error)
+            return
+        if not readable:
+            log("ждём AT-команды от навигатора…")
+            continue
+        try:
             chunk = os.read(fd, 2048)
+        except BlockingIOError:
+            continue
         except OSError as error:
+            # 11 = EAGAIN на старых ядрах / если fd снова non-blocking
+            if error.errno in (11, getattr(__import__("errno"), "EAGAIN", 11)):
+                try:
+                    os.set_blocking(fd, True)
+                except OSError:
+                    pass
+                continue
             log("обрыв на AT: %s" % error)
             return
         if not chunk:
@@ -168,7 +194,11 @@ def run_at_then_ppp(fd: int, log: Callable[[str], None]) -> None:
         reply = modem.feed(chunk)
         if reply:
             log("AT >> %r" % reply)
-            os.write(fd, reply)
+            try:
+                os.write(fd, reply)
+            except OSError as error:
+                log("запись AT: %s" % error)
+                return
         if modem.hungup:
             log("навигатор положил трубку")
             return
