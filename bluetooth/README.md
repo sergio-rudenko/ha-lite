@@ -1,8 +1,18 @@
 # Bluetooth: S570HD ↔ ha217b
 
-## 1. Сопряжение — уже сделано
+## 1. Сопряжение (PIN 1234)
 
-`ha217b` в trusted на навигаторе.
+На нетбуке:
+
+```bash
+sudo pkill bt-agent 2>/dev/null || true
+sudo bash bluetooth/pair.sh
+# по умолчанию PIN 1234
+```
+
+На навигаторе: найти **ha217b** → ввести PIN **1234** (экранная клавиатура WinCE).
+
+Без PIN: `sudo bash bluetooth/pair.sh --just-works`.
 
 ## 2. Дозвон (сейчас)
 

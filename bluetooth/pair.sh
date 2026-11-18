@@ -1,16 +1,16 @@
 #!/bin/bash
 # Сопряжение S570HD ↔ нетбук ha217b.
 # Запускать НА нетбуке (192.168.8.139):
-#   sudo bash bluetooth/pair.sh              # ждать навигатор, Just Works (без PIN)
-#   sudo bash bluetooth/pair.sh --pin        # PIN 1234 (если Just Works не взял)
+#   sudo bash bluetooth/pair.sh              # PIN 1234 (навигатор вводит с клавиатуры)
+#   sudo bash bluetooth/pair.sh --just-works # без PIN
 #   sudo bash bluetooth/pair.sh --to AA:BB:CC:DD:EE:FF
-#       # начать пару с нетбука; PIN вводит агент, на навигаторе ничего не печатают
+#       # пару начинает нетбук; PIN подставляет агент
 set -euo pipefail
 
 PIN="${PIN:-1234}"
 BT_NAME="${BT_NAME:-ha217b}"
 PIN_FILE="${PIN_FILE:-/tmp/ha-panel-bt-pin}"
-MODE="justworks"
+MODE="pin"
 TARGET=""
 
 while [[ $# -gt 0 ]]; do
