@@ -15,11 +15,18 @@ LOCAL_IP = "10.44.0.1"
 REMOTE_IP = "10.44.0.2"
 
 
+# Ответы «как у простого GSM-модема»: оболочка S570HD сначала
+# прощупывает CGMI/CGSN/SMS и сбрасывает линк, если формат неверный.
+_MANUFACTURER = "ha217b"
+_MODEL = "HA-Panel-DUN"
+_IMEI = "359999091234567"
+_REVISION = "1.0"
+
+
 class AtModem:
     """Принимает AT-команды и отделяет их от кадров PPP.
 
-    Навигатор шлёт AT и номер *99#, после CONNECT начинается PPP.
-    Иногда кадр PPP приходит в том же чтении, что и ATD.
+    Навигатор шлёт опрос модема, затем ATD*99#; после CONNECT — PPP.
     """
 
     def __init__(self) -> None:
@@ -58,18 +65,108 @@ class AtModem:
         text = line.decode("ascii", "replace").strip()
         if not text:
             return b""
-        upper = text.upper()
-        if not upper.startswith("AT"):
+        # Несколько команд в одной строке: AT+CGMI;+CGMM
+        if not text.upper().startswith("AT"):
             return b""
-        body = upper[2:].lstrip()
-        if body.startswith("D"):
+        body = text[2:]
+        parts = [p.strip() for p in body.split(";") if p.strip()]
+        if not parts:
+            return _ok()
+        out = bytearray()
+        for part in parts:
+            out.extend(self._one(part))
+            if self.finished or self.hungup:
+                break
+        return bytes(out)
+
+    def _one(self, raw: str) -> bytes:
+        cmd = raw.strip()
+        upper = cmd.upper()
+
+        if upper.startswith("D") or upper.startswith("TD") or upper.startswith("DT"):
+            # ATD*99# / ATDT*99***1#
             self.finished = True
             return b"CONNECT\r\n"
-        if body.startswith("H"):
+
+        if upper.startswith("H"):
             self.hungup = True
             self.finished = True
-            return b"OK\r\n"
-        return b"OK\r\n"
+            return _ok()
+
+        if upper in ("", "E0", "E1", "V0", "V1", "Q0", "Q1", "Z", "&F", "&D2", "&C1", "X4", "S0=0"):
+            return _ok()
+
+        if upper.startswith("I"):
+            return _info("%s %s" % (_MANUFACTURER, _MODEL))
+
+        # Идентификация (текстовая строка + OK)
+        if upper in ("+CGMI", "+GMI", "+FMI"):
+            return _info(_MANUFACTURER)
+        if upper in ("+CGMM", "+GMM", "+FMM"):
+            return _info(_MODEL)
+        if upper in ("+CGMR", "+GMR", "+FMR"):
+            return _info(_REVISION)
+        if upper in ("+CGSN", "+GSN", "+GSV"):
+            return _info(_IMEI)
+        if upper == "+CIMI":
+            return _info("250019999999999")
+
+        # SMS / телефонная книга — только чтобы зонд оболочки прошёл дальше к ATD
+        if upper.startswith("+CPBS=?"):
+            return _cme('+CPBS: ("SM","ME","DC","MT")')
+        if upper.startswith("+CPBS"):
+            return _ok()
+        if upper.startswith("+CSMS=?"):
+            return _cme("+CSMS: (0,1)")
+        if upper.startswith("+CSMS"):
+            return _cme("+CSMS: 0,1,1")
+        if upper.startswith("+CPMS=?"):
+            return _cme('+CPMS: ("SM","ME"),("SM","ME"),("SM","ME")')
+        if upper.startswith("+CPMS"):
+            return _cme("+CPMS: 0,40,0,40,0,40")
+        if upper.startswith("+CNMI"):
+            return _ok()
+        if upper.startswith("+CMGF"):
+            return _ok()
+        if upper.startswith("+CMGL"):
+            return _ok()
+
+        # Сеть / GPRS
+        if upper.startswith("+CSQ"):
+            return _cme("+CSQ: 20,0")
+        if upper.startswith("+CREG=?"):
+            return _cme("+CREG: (0-2)")
+        if upper.startswith("+CREG?"):
+            return _cme("+CREG: 0,1")
+        if upper.startswith("+CREG"):
+            return _ok()
+        if upper.startswith("+CGATT?"):
+            return _cme("+CGATT: 1")
+        if upper.startswith("+CGATT"):
+            return _ok()
+        if upper.startswith("+CGDCONT"):
+            return _ok()
+        if upper.startswith("+COPS?"):
+            return _cme('+COPS: 0,0,"HA-Panel"')
+        if upper.startswith("+COPS"):
+            return _ok()
+        if upper.startswith("+CLIP"):
+            return _ok()
+
+        # Всё остальное AT+ / AT& — OK, чтобы не рвать сессию
+        return _ok()
+
+
+def _ok() -> bytes:
+    return b"OK\r\n"
+
+
+def _info(text: str) -> bytes:
+    return ("%s\r\nOK\r\n" % text).encode("ascii")
+
+
+def _cme(line: str) -> bytes:
+    return ("%s\r\nOK\r\n" % line).encode("ascii")
 
 
 def _eol(buf: bytearray) -> int | None:
